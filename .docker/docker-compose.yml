@@ -1,0 +1,29 @@
+# Example command:
+#   On a Nvidia system:
+#   PATH_TO_GPBSF="PATH_TO_GPBSF" docker compose run gpu
+#   e.g.
+#   PATH_TO_GPBSF="/root/code/GPBSF" docker compose run gpu
+
+services:
+  gpu:
+    image: docker.io/beta1scat/gpbsf:1.0
+    container_name: gpbsf
+    privileged: true
+    network_mode: host
+    command: /bin/bash
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - /root/.Xauthority:/root/.Xauthority
+      - $PATH_TO_GPBSF:/root/code/gpbsf
+    environment:
+      QT_X11_NO_MITSHM: 1
+      DISPLAY: $DISPLAY
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
