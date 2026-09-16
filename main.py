@@ -1,12 +1,24 @@
-# import os
-# import cv2
-# import torch
-# import numpy as np
-# import open3d as o3d
-# import matplotlib.pyplot as plt
+import os
+import sys
+from pathlib import Path
+
 from sam import *
-from shape_fitting_bgs import *
-sys.path.append("Mamba3D")
+from shape_fitting import FittingByBGS, _oriented_bounding_box
+from shape_fitting.pointcloud import (
+    generate_cone_points,
+    generate_cube_points,
+    generate_ellipsoid_points,
+    pc_normalize,
+)
+
+REPOSITORY_ROOT = Path(__file__).resolve().parent
+MAMBA3D_ROOT = REPOSITORY_ROOT / "submodels" / "mamba3d"
+if not MAMBA3D_ROOT.is_dir():
+    raise FileNotFoundError(
+        f"Mamba3D submodule is missing at {MAMBA3D_ROOT}. "
+        "Run: git submodule update --init --recursive"
+    )
+sys.path.insert(0, str(MAMBA3D_ROOT))
 from tools import builder
 from utils.config import *
 from utils import misc
@@ -143,8 +155,8 @@ for file in files:
             pcd_fit = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points))
             print(f"Fitting points: {len(pcd_fit.points)} points")
             pcd_fit_list.append(pcd_fit)
-            obb_pcd_size = np.array(sorted(pcd.get_minimal_oriented_bounding_box().extent))
-            obb_pcd_fit_size = np.array(sorted(pcd_fit.get_minimal_oriented_bounding_box().extent))
+            obb_pcd_size = np.array(sorted(_oriented_bounding_box(pcd).extent))
+            obb_pcd_fit_size = np.array(sorted(_oriented_bounding_box(pcd_fit).extent))
             obb_ratio_list.append(sum(abs(obb_pcd_fit_size - obb_pcd_size)))
             print(f"obb_ratio: {sum(abs(obb_pcd_fit_size - obb_pcd_size))}")
             dist_pcd_fit = o3d.geometry.PointCloud(pcd_fit)

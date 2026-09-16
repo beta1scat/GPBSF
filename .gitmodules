@@ -1,0 +1,6 @@
+[submodule "submodels/pointnet2"]
+	path = submodels/pointnet2
+	url = git@github.com:beta1scat/Pointnet_Pointnet2_pytorch.git
+[submodule "submodels/mamba3d"]
+	path = submodels/mamba3d
+	url = git@github.com:beta1scat/Mamba3D_for_GPBSF.git

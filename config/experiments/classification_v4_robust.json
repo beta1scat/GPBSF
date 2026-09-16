@@ -1,0 +1,6 @@
+{
+  "dataset": {"manifest": "data/bgspcd_v4_robust/manifest.jsonl"},
+  "training": {"num_points": 2048, "batch_size": 32, "epochs": 125, "learning_rate": 0.0005, "weight_decay": 0.05, "num_workers": 0, "pin_memory": true, "device": "auto"},
+  "models": {"mamba3d": {"trans_dim": 384, "depth": 12, "drop_path_rate": 0.1, "num_heads": 6, "group_size": 32, "num_group": 128, "encoder_dims": 384, "bimamba_type": "v4", "center_local_k": 4, "ordering": false, "label_smooth": 0.0}},
+  "output": {"runs_dir": "runs/classification_v4_robust"}
+}

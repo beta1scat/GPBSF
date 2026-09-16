@@ -1,0 +1,62 @@
+{
+  "dataset_name": "BGSPCD-v3-camera",
+  "output_dir": "data/bgspcd_v3_camera",
+  "master_seed": 20260915,
+  "num_families": 1800,
+  "variants_per_difficulty": 3,
+  "points_per_sample": 2048,
+  "surface_oversample_factor": 6,
+  "camera": {
+    "width": 960,
+    "height": 512,
+    "horizontal_fov_radians": 0.8457078337669373,
+    "near_plane_m": 0.10,
+    "depth_quantization_m": 0.001
+  },
+  "splits": {
+    "train": 0.70,
+    "val": 0.15,
+    "test": 0.15
+  },
+  "primitives": {
+    "cuboid": {
+      "length": [0.035, 0.160],
+      "width": [0.025, 0.120],
+      "height": [0.020, 0.100]
+    },
+    "frustum": {
+      "bottom_radius": [0.020, 0.075],
+      "top_radius_ratio": [0.30, 0.90],
+      "height": [0.040, 0.160]
+    },
+    "ellipsoid": {
+      "axis_x": [0.025, 0.090],
+      "axis_y": [0.020, 0.075],
+      "axis_z": [0.020, 0.070]
+    }
+  },
+  "pose": {
+    "translation_x": [-0.15, 0.15],
+    "translation_y": [-0.15, 0.15],
+    "translation_z": [0.45, 0.85],
+    "rotation_angle": [-3.141592653589793, 3.141592653589793]
+  },
+  "difficulty": {
+    "easy": {
+      "occluder_fraction": [0.00, 0.08],
+      "noise_std": [0.0000, 0.0008],
+      "outlier_ratio": [0.00, 0.01]
+    },
+    "medium": {
+      "occluder_fraction": [0.08, 0.28],
+      "noise_std": [0.0008, 0.0020],
+      "outlier_ratio": [0.01, 0.05]
+    },
+    "hard": {
+      "occluder_fraction": [0.28, 0.55],
+      "noise_std": [0.0020, 0.0040],
+      "outlier_ratio": [0.05, 0.12]
+    }
+  },
+  "outlier_bbox_expansion": 1.35
+}

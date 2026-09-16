@@ -1,1 +1,13 @@
-__pycache__
+__pycache__/
+*.py[cod]
+
+# Reproducible experiment outputs. Manifests and aggregate tables intended for
+# the thesis should be copied to a tracked results directory explicitly.
+runs/
+data/bgspcd_v2/
+data/bgspcd_v3_camera/
+data/experiment/
+
+# Local model checkpoints are large and machine-specific.
+models/*.pth
+!models/.gitkeep

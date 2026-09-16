@@ -58,7 +58,7 @@ def pc_normalize(pc):
 if __name__ == "__main__":
     sam_predictor = SegmentAnythinModel("models/sam_vit_h_4b8939.pth")
 
-    base_path = "/root/code/Mamba3D/data/results/real_flat"
+    base_path = os.path.join(os.path.dirname(__file__), "data", "real_flat")
     fx = 2422.5631472657747
     fy = 2422.603833233446
     cx = 962.2960960737917

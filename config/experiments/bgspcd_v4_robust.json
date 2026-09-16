@@ -1,0 +1,30 @@
+{
+  "dataset_name": "BGSPCD-v4-robust",
+  "output_dir": "data/bgspcd_v4_robust",
+  "legacy_dataset_root": "data/bgspcd",
+  "master_seed": 20260916,
+  "families_per_primitive": 600,
+  "points_per_sample": 2048,
+  "surface_candidate_points": 32768,
+  "minimum_unique_visible_points": 4096,
+  "max_view_attempts": 40,
+  "splits": {"train": 0.80, "val": 0.10, "test": 0.10},
+  "camera": {"width": 960, "height": 512, "horizontal_fov_radians": 0.8457078337669373, "near_plane_m": 0.10, "depth_quantization_m": 0.001},
+  "pose": {"translation_x": [-0.025, 0.025], "translation_y": [-0.025, 0.025], "translation_z": [0.50, 0.75], "rotation_angle": [-3.141592653589793, 3.141592653589793]},
+  "primitives": {
+    "cuboid": {"length": [0.035, 0.160], "width": [0.025, 0.120], "height": [0.020, 0.100]},
+    "frustum": {"bottom_radius": [0.020, 0.075], "top_radius_ratio": [0.10, 1.10], "height": [0.040, 0.160]},
+    "ellipsoid": {"axis_x": [0.025, 0.090], "axis_y": [0.020, 0.075], "axis_z": [0.020, 0.070]}
+  },
+  "observation_modes": [
+    {"name": "single_view", "full_observation": false, "occluder_fraction": [0.00, 0.03], "noise_std": [0.0000, 0.0006], "outlier_ratio": [0.00, 0.005]},
+    {"name": "single_view_sensor", "full_observation": false, "occluder_fraction": [0.00, 0.08], "noise_std": [0.0006, 0.0015], "outlier_ratio": [0.005, 0.015]},
+    {"name": "single_view_partial", "full_observation": false, "occluder_fraction": [0.08, 0.20], "noise_std": [0.0010, 0.0020], "outlier_ratio": [0.010, 0.025]},
+    {"name": "single_view_occluded", "full_observation": false, "occluder_fraction": [0.15, 0.30], "noise_std": [0.0015, 0.0025], "outlier_ratio": [0.015, 0.030]},
+    {"name": "single_view_rotated", "full_observation": false, "occluder_fraction": [0.00, 0.05], "noise_std": [0.0000, 0.0010], "outlier_ratio": [0.000, 0.010]},
+    {"name": "single_view_sparse", "full_observation": false, "occluder_fraction": [0.05, 0.15], "noise_std": [0.0010, 0.0020], "outlier_ratio": [0.005, 0.020]},
+    {"name": "single_view_clean", "full_observation": false, "occluder_fraction": [0.00, 0.00], "noise_std": [0.0000, 0.0003], "outlier_ratio": [0.000, 0.000]},
+    {"name": "full_surface_prior", "full_observation": true, "occluder_fraction": [0.00, 0.00], "noise_std": [0.0000, 0.0008], "outlier_ratio": [0.000, 0.010]}
+  ],
+  "outlier_bbox_expansion": 1.20
+}
