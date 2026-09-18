@@ -47,6 +47,23 @@ def _matrix(transform) -> np.ndarray:
     return np.asarray(getattr(transform, "A", transform), dtype=np.float64)
 
 
+def _valid_fit_parameters(params) -> bool:
+    """Check that a fitter result is usable before counting it as a success."""
+    if not params or len(params) != 4:
+        return False
+    try:
+        dimensions = np.asarray(params[:3], dtype=np.float64)
+        transform = _matrix(params[3])
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        np.all(np.isfinite(dimensions))
+        and np.all(dimensions > 0.0)
+        and transform.shape == (4, 4)
+        and np.all(np.isfinite(transform))
+    )
+
+
 def _predicted_geometry(primitive: str, params):
     values = [float(value) for value in params[:-1]]
     transform = _matrix(params[-1])
@@ -84,7 +101,13 @@ def _chamfer(left: np.ndarray, right: np.ndarray) -> float:
 
 def _summary(rows: list[dict]) -> dict:
     valid = [row for row in rows if row["fit_success"]]
-    result = {"sample_count": len(rows), "fit_success_rate": len(valid) / len(rows) if rows else 0.0}
+    metrics_valid = [row for row in valid if row["metrics_valid"]]
+    result = {
+        "sample_count": len(rows),
+        "fit_success_rate": len(valid) / len(rows) if rows else 0.0,
+        "metrics_valid_count": len(metrics_valid),
+        "metrics_valid_rate_among_fits": len(metrics_valid) / len(valid) if valid else 0.0,
+    }
     for key in ("center_error_m", "size_relative_error", "surface_chamfer_m", "observed_to_fitted_m", "runtime_ms"):
         values = [float(row[key]) for row in valid if row[key] is not None]
         result[key] = {"median": float(np.median(values)) if values else None, "p95": float(np.quantile(values, 0.95)) if values else None}
@@ -116,8 +139,27 @@ def evaluate(args: argparse.Namespace) -> None:
             params, error = [], f"{type(exc).__name__}: {exc}"
         else:
             error = fitter.last_error
+        fit_success = _valid_fit_parameters(params)
+        if params and not fit_success and error is None:
+            error = "invalid_fit_parameters"
         runtime_ms = 1000.0 * (__import__("time").perf_counter() - started)
-        row = {"sample_id": record["sample_id"], "primitive": primitive, "difficulty": record["difficulty"], "fit_success": bool(params), "fitting_method": fitter.last_method, "error": error, "runtime_ms": runtime_ms, "center_error_m": None, "size_relative_error": None, "surface_chamfer_m": None, "observed_to_fitted_m": None}
+        row = {
+            "sample_id": record["sample_id"],
+            "primitive": primitive,
+            "difficulty": record.get("difficulty", "not_stratified"),
+            "source_dataset": record.get("source_dataset", "unspecified"),
+            "observation_mode": record.get("observation_mode", "unspecified"),
+            "fit_success": fit_success,
+            "metrics_valid": False,
+            "fitting_method": fitter.last_method,
+            "error": error,
+            "metric_error": None,
+            "runtime_ms": runtime_ms,
+            "center_error_m": None,
+            "size_relative_error": None,
+            "surface_chamfer_m": None,
+            "observed_to_fitted_m": None,
+        }
         if params:
             try:
                 predicted_dimensions, predicted_pose = _predicted_geometry(primitive, params)
@@ -131,9 +173,12 @@ def evaluate(args: argparse.Namespace) -> None:
                 predicted_surface = _apply_pose(_sample_surface(primitive, rng, args.surface_points, predicted_dimensions), predicted_pose)
                 row["surface_chamfer_m"] = _chamfer(predicted_surface, truth_surface)
                 row["observed_to_fitted_m"] = _chamfer(observed, predicted_surface)
+                row["metrics_valid"] = True
             except Exception as exc:
-                row["fit_success"] = False
-                row["error"] = f"metric {type(exc).__name__}: {exc}"
+                # A metric or manifest error must not be reclassified as a
+                # geometric fitting failure.  Both states are retained in the
+                # CSV so the reported success rate remains auditable.
+                row["metric_error"] = f"{type(exc).__name__}: {exc}"
         rows.append(row)
         if index % 25 == 0 or index == len(records):
             print(f"Processed {index}/{len(records)} samples")
@@ -145,9 +190,24 @@ def evaluate(args: argparse.Namespace) -> None:
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
-    by_difficulty = {difficulty: _summary([row for row in rows if row["difficulty"] == difficulty]) for difficulty in ("easy", "medium", "hard")}
-    by_primitive = {primitive: _summary([row for row in rows if row["primitive"] == primitive]) for primitive in ("cuboid", "frustum", "ellipsoid")}
-    summary = {"overall": _summary(rows), "by_difficulty": by_difficulty, "by_primitive": by_primitive, "protocol": {"routing": "ground_truth_oracle", "meaning": "isolates geometric fitting from classification error"}}
+    difficulties = sorted({row["difficulty"] for row in rows})
+    primitives = sorted({row["primitive"] for row in rows})
+    sources = sorted({row["source_dataset"] for row in rows})
+    by_difficulty = {difficulty: _summary([row for row in rows if row["difficulty"] == difficulty]) for difficulty in difficulties}
+    by_primitive = {primitive: _summary([row for row in rows if row["primitive"] == primitive]) for primitive in primitives}
+    by_source = {source: _summary([row for row in rows if row["source_dataset"] == source]) for source in sources}
+    summary = {
+        "overall": _summary(rows),
+        "by_difficulty": by_difficulty,
+        "by_primitive": by_primitive,
+        "by_source_dataset": by_source,
+        "protocol": {
+            "routing": "ground_truth_oracle",
+            "meaning": "isolates geometric fitting from classification error",
+            "fit_success_definition": "the fitter returned finite geometric parameters",
+            "metrics_valid_definition": "all ground-truth metric calculations completed",
+        },
+    }
     output.with_suffix(".summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 

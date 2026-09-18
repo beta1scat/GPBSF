@@ -72,7 +72,14 @@ PyTorch 1.13.1, and CUDA 11.7. Install its pinned requirements and CUDA
 extensions in a dedicated environment before running the Mamba3D entries; the
 PointNet++ baseline must use the same PyTorch environment and the same GPU.
 
-When using the supplied Docker image, keep NumPy below version 2. The image's
+Launch the dedicated pre-configured Mamba3D container directly (recommended, image: `beta1scat/mamba3d:1.0`):
+
+```bash
+cd .docker
+PATH_TO_GPBSF=/absolute/path/to/gpbsf docker compose run mamba3d
+```
+
+Alternatively, when using the base Docker image (`beta1scat/gpbsf:1.0` via `docker compose run gpu`), keep NumPy below version 2. The image's
 PyTorch binary was compiled against the NumPy 1.x C API; NumPy 2 causes the
 `_ARRAY_API not found` warning and may make tensor--NumPy conversion fail.
 Install dependencies from inside the running container, at the GPBSF root:
@@ -341,13 +348,27 @@ metrics are stored in `metrics.jsonl` in that same directory.
 
 Evaluate geometric fitting against the synthetic geometry truth retained in the
 manifest. This reports observed-to-fitted residual separately from the
-independent fitted-to-truth surface error:
+independent fitted-to-truth surface error. The resulting CSV separates
+`fit_success` (the fitter returned parameters) from `metrics_valid` (all
+ground-truth metric calculations completed), so an evaluation-side exception
+cannot be misreported as a fitting failure:
 
 ```bash
 python -m experiments.fitting.evaluate \
   --manifest data/bgspcd_v3_camera/manifest.jsonl \
   --split test \
   --output runs/fitting/oracle_test.csv
+```
+
+To assess the final V4-Robust mixed corpus, replace the manifest and use a
+new output path. V4 records are grouped as `not_stratified` in the difficulty
+summary because their controlled factors are stored as observation modes:
+
+```bash
+python -m experiments.fitting.evaluate \
+  --manifest data/bgspcd_v4_robust/manifest.jsonl \
+  --split test \
+  --output runs/fitting/v4_robust_oracle_test.csv
 ```
 
 ## 6. Notes

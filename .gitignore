@@ -4,10 +4,24 @@ __pycache__/
 # Reproducible experiment outputs. Manifests and aggregate tables intended for
 # the thesis should be copied to a tracked results directory explicitly.
 runs/
+data/bgspcd/
 data/bgspcd_v2/
 data/bgspcd_v3_camera/
+data/bgspcd_v4_robust/
 data/experiment/
 
 # Local model checkpoints are large and machine-specific.
 models/*.pth
 !models/.gitkeep
+
+# Archives and distribution packages
+*.zip
+*.tar.gz
+kaggle_assets/
+
+# Logs and runtime artifacts
+*.log
+
+# Editor and IDE configurations
+.vscode/
+.idea/

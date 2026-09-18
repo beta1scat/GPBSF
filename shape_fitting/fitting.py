@@ -289,15 +289,26 @@ def fit_frustum_cone_by_slice_linear(points, num_layers=10, pcd=None, is_debug=F
         r2 is the bottom radius, and center is the [x, y, z] center.
         Returns None if fitting fails.
     """
+    points = np.asarray(points, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] != 3 or len(points) < 4:
+        raise ValueError("Frustum fitting requires at least four finite XYZ points")
+    points = points[np.all(np.isfinite(points), axis=1)]
+    if len(points) < 4:
+        raise ValueError("Frustum fitting received fewer than four finite XYZ points")
+
     x, y, z = points[:, 0], points[:, 1], points[:, 2]
     z_min, z_max = z.min(), z.max()
     height = z_max - z_min
+    if height <= np.finfo(np.float64).eps:
+        raise ValueError("Frustum fitting received a degenerate axial extent")
 
     layer_pts = []
     for i in range(num_layers):
         layer_min = z_min + i * height / num_layers
         layer_max = z_min + (i + 1) * height / num_layers
-        mask = (z >= layer_min) & (z < layer_max)
+        # The closed upper bound on the last layer prevents the axial endpoint
+        # from being silently discarded.
+        mask = (z >= layer_min) & ((z < layer_max) if i + 1 < num_layers else (z <= layer_max))
         layer_pts.append(points[mask])
 
     # Fit circle to each layer using fast closed-form Kåsa algebraic fit
@@ -314,22 +325,47 @@ def fit_frustum_cone_by_slice_linear(points, num_layers=10, pcd=None, is_debug=F
                 layer_radius[layer_idx] = r
                 layer_center[layer_idx] = c
 
-    if len(layer_radius) < 0.5 * num_layers:
-        return None
+    if len(layer_radius) < max(3, int(np.ceil(0.3 * num_layers))):
+        # A partial camera view can leave too few slices for independent
+        # circle fits.  Estimate a conservative circular profile rather than
+        # returning None and letting the dispatcher count a Python error as a
+        # geometric fitting failure.
+        center_xy = np.median(points[:, :2], axis=0)
+        radius = np.linalg.norm(points[:, :2] - center_xy, axis=1)
+        lower = radius[z <= np.quantile(z, 0.25)]
+        upper = radius[z >= np.quantile(z, 0.75)]
+        valid_radius = radius[np.isfinite(radius) & (radius > 1e-6)]
+        if not len(valid_radius):
+            raise ValueError("Frustum fitting could not estimate a positive radial profile")
+        fallback_radius = float(np.quantile(valid_radius, 0.75))
+        r2 = float(np.median(lower)) if len(lower) else fallback_radius
+        r1 = float(np.median(upper)) if len(upper) else fallback_radius
+        min_physical_r = max(1e-4, fallback_radius * 0.05)
+        return max(r1, min_physical_r), max(r2, min_physical_r), height, np.array([
+            center_xy[0], center_xy[1], (z_min + z_max) / 2,
+        ])
 
     # RANSAC linear regression on layer radii
-    ransac_reg = linear_model.RANSACRegressor()
+    ransac_reg = linear_model.RANSACRegressor(random_state=0)
     X_fit = np.array(list(layer_radius.keys()))[:, np.newaxis]
     y_fit = np.array(list(layer_radius.values()))
-    ransac_reg.fit(X_fit, y_fit)
-    inlier_mask = np.where(ransac_reg.inlier_mask_)[0]
-    line_x = np.array(range(num_layers))[:, np.newaxis]
-    line_y = ransac_reg.predict(line_x)
+    try:
+        ransac_reg.fit(X_fit, y_fit)
+        inlier_mask = np.flatnonzero(ransac_reg.inlier_mask_)
+        line_y = ransac_reg.predict(np.arange(num_layers)[:, np.newaxis])
+    except ValueError:
+        # Deterministic least-squares is preferable to an exception when the
+        # visible portion supplies an underdetermined RANSAC consensus set.
+        regressor = LinearRegression().fit(X_fit, y_fit)
+        inlier_mask = np.arange(len(y_fit))
+        line_y = regressor.predict(np.arange(num_layers)[:, np.newaxis])
     min_physical_r = max(1e-4, float(np.min(y_fit)) * 0.05) if len(y_fit) > 0 else 1e-4
     r2 = max(float(line_y[0]), min_physical_r)  # bottom (min Z)
     r1 = max(float(line_y[-1]), min_physical_r)  # top (max Z)
 
-    center_arr = np.array(list(layer_center.values()))
+    center_arr = np.array(list(layer_center.values()), dtype=np.float64)
+    if not len(inlier_mask):
+        inlier_mask = np.arange(len(center_arr))
     center = np.array(
         [
             np.mean(center_arr[inlier_mask, 0]),
@@ -354,15 +390,20 @@ def fit_frustum_cone_by_slice_poly(points, num_layers=10):
     Returns:
         Tuple of (r1, r2, height, center).
     """
+    points = np.asarray(points, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] != 3 or len(points) < 4:
+        raise ValueError("Frustum fitting requires at least four XYZ points")
     x, y, z = points[:, 0], points[:, 1], points[:, 2]
     z_min, z_max = z.min(), z.max()
     height = z_max - z_min
+    if height <= np.finfo(np.float64).eps:
+        raise ValueError("Frustum fitting received a degenerate axial extent")
 
     layer_pts = []
     for i in range(num_layers):
         layer_min = z_min + i * height / num_layers
         layer_max = z_min + (i + 1) * height / num_layers
-        mask = (z >= layer_min) & (z < layer_max)
+        mask = (z >= layer_min) & ((z < layer_max) if i + 1 < num_layers else (z <= layer_max))
         layer_pts.append(points[mask])
 
     layer_radius = {}
@@ -378,13 +419,19 @@ def fit_frustum_cone_by_slice_poly(points, num_layers=10):
                 layer_radius[layer_idx] = r
                 layer_center[layer_idx] = c
 
+    if len(layer_radius) < max(3, int(np.ceil(0.3 * num_layers))):
+        return fit_frustum_cone_by_slice_linear(points, num_layers)
+
     X_fit = np.array(list(layer_radius.keys()))[:, np.newaxis]
     y_fit = np.array(list(layer_radius.values()))
     model = make_pipeline(
         PolynomialFeatures(degree=2),
-        RANSACRegressor(LinearRegression()),
+        RANSACRegressor(LinearRegression(), random_state=0),
     )
-    model.fit(X_fit, y_fit.ravel())
+    try:
+        model.fit(X_fit, y_fit.ravel())
+    except ValueError:
+        return fit_frustum_cone_by_slice_linear(points, num_layers)
     ransac_model = model.named_steps["ransacregressor"]
     inlier_mask = ransac_model.inlier_mask_
 
@@ -793,12 +840,22 @@ class FittingByBGS:
             params = [a, b, c, T]
 
         elif cls == "1":
-            r1, r2, height, T = fit_frustum_cone_normal(
-                pcd_fit,
-                plane_t=0.005,
-                normal_t=0.02,
-                use_plane_normal=True,
-            )
+            try:
+                r1, r2, height, T = fit_frustum_cone_normal(
+                    pcd_fit,
+                    plane_t=0.005,
+                    normal_t=0.02,
+                    use_plane_normal=True,
+                )
+                self.last_method = "normal_slice"
+            except (ValueError, RuntimeError, np.linalg.LinAlgError) as exc:
+                # The normal-clustering path is preferred, but partial views
+                # sometimes contain no stable planar normal cluster.  PCA uses
+                # the same slice estimator and preserves a valid geometric
+                # fitting attempt without exposing an unpacking exception.
+                r1, r2, height, T = fit_frustum_cone_pca(pcd_fit, z_dir=0)
+                self.last_method = "pca_slice_fallback"
+                self.last_error = f"normal_slice_fallback: {type(exc).__name__}: {exc}"
             if visual:
                 self._visualize_cone(pcd, r1, r2, height, T)
             params = [r1, r2, height, T]

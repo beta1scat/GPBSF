@@ -106,9 +106,12 @@ def _write_json(path: Path, value: dict) -> None:
 
 def _log(destination: Path, message: str) -> None:
     """Emit progress immediately and retain the same text in the run folder."""
-    print(message, flush=True)
+    import datetime
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    formatted_message = f"[{timestamp}] {message}"
+    print(formatted_message, flush=True)
     with (destination / "training.log").open("a", encoding="utf-8", newline="\n") as stream:
-        stream.write(message + "\n")
+        stream.write(formatted_message + "\n")
 
 
 def train(config: dict, model_name: str, seed: int, output_override=None) -> Path:
@@ -117,13 +120,11 @@ def train(config: dict, model_name: str, seed: int, output_override=None) -> Pat
     set_seed(seed)
     root = repository_root()
     destination = run_directory(config, model_name, seed, output_override)
-    if destination.exists():
-        raise FileExistsError(f"Run directory already exists: {destination}. Use a new --run-dir.")
+    destination.mkdir(parents=True, exist_ok=True)
     device = resolve_device(config["training"].get("device", "auto"))
     print(f"[{model_name} | seed={seed}] Preparing model on {device} ...", flush=True)
     adapter = build_adapter(model_name, root, device, config.get("models", {}).get("mamba3d"))
     train_loader, val_loader, _ = _build_loaders(config, seed)
-    destination.mkdir(parents=True)
     optimizer = torch.optim.AdamW(
         adapter.model.parameters(),
         lr=float(config["training"]["learning_rate"]),
@@ -142,18 +143,41 @@ def train(config: dict, model_name: str, seed: int, output_override=None) -> Pat
             "manifest_sha256": file_sha256(manifest),
         }
     )
-    _write_json(destination / "config.resolved.json", resolved)
-    _write_json(destination / "environment.json", environment_record(root))
-    _log(
-        destination,
-        f"[{model_name} | seed={seed}] Start: train={len(train_loader.dataset)}, "
-        f"val={len(val_loader.dataset)}, parameters={adapter.parameter_count():,}, "
-        f"epochs={config['training']['epochs']}",
-    )
 
+    last_checkpoint_path = destination / "last.pt"
+    is_resuming = last_checkpoint_path.is_file()
     best_accuracy, best_epoch = -1.0, -1
+    start_epoch = 1
+
+    if is_resuming:
+        checkpoint = torch.load(last_checkpoint_path, map_location=device)
+        adapter.model.load_state_dict(checkpoint["model_state"], strict=True)
+        optimizer.load_state_dict(checkpoint["optimizer_state"])
+        scheduler.load_state_dict(checkpoint["scheduler_state"])
+        start_epoch = int(checkpoint["epoch"]) + 1
+        best_accuracy = float(checkpoint.get("best_accuracy", -1.0))
+        best_epoch = int(checkpoint.get("best_epoch", -1))
+        _log(
+            destination,
+            f"[{model_name} | seed={seed}] 🔁 检测到历史断点 last.pt，自动从 Epoch {start_epoch:03d} 恢复训练 "
+            f"(历史最佳验证集准确率: {best_accuracy:.4f}@{best_epoch})",
+        )
+        if start_epoch > int(config["training"]["epochs"]):
+            _log(destination, f"[{model_name} | seed={seed}] 已完成所有 {config['training']['epochs']} 轮训练，无需继续。")
+            return destination
+    else:
+        _write_json(destination / "config.resolved.json", resolved)
+        _write_json(destination / "environment.json", environment_record(root))
+        _log(
+            destination,
+            f"[{model_name} | seed={seed}] Start: train={len(train_loader.dataset)}, "
+            f"val={len(val_loader.dataset)}, parameters={adapter.parameter_count():,}, "
+            f"epochs={config['training']['epochs']}",
+        )
+
     history_path = destination / "metrics.jsonl"
-    for epoch in range(1, int(config["training"]["epochs"]) + 1):
+    for epoch in range(start_epoch, int(config["training"]["epochs"]) + 1):
+        epoch_start_time = time.perf_counter()
         adapter.model.train()
         losses, correct, samples = [], 0, 0
         for points, labels, _ in train_loader:
@@ -169,8 +193,10 @@ def train(config: dict, model_name: str, seed: int, output_override=None) -> Pat
             samples += int(labels.numel())
         scheduler.step()
         validation, _ = _evaluate(adapter, val_loader, device, include_predictions=False)
+        epoch_elapsed = time.perf_counter() - epoch_start_time
         row = {
             "epoch": epoch,
+            "duration_seconds": round(epoch_elapsed, 2),
             "train_loss": float(np.mean(losses)) if losses else 0.0,
             "train_accuracy": correct / samples if samples else 0.0,
             "learning_rate": optimizer.param_groups[0]["lr"],
@@ -190,9 +216,24 @@ def train(config: dict, model_name: str, seed: int, output_override=None) -> Pat
                 },
                 destination / "best.pt",
             )
+        # 无论是否破纪录，每轮自动持久化 last.pt 用于断点续跑
+        torch.save(
+            {
+                "model": model_name,
+                "seed": seed,
+                "epoch": epoch,
+                "model_state": adapter.model.state_dict(),
+                "optimizer_state": optimizer.state_dict(),
+                "scheduler_state": scheduler.state_dict(),
+                "best_accuracy": best_accuracy,
+                "best_epoch": best_epoch,
+                "config": resolved,
+            },
+            destination / "last.pt",
+        )
         _log(
             destination,
-            f"[{model_name} | seed={seed}] Epoch {epoch:03d}/{config['training']['epochs']} | "
+            f"[{model_name} | seed={seed}] Epoch {epoch:03d}/{config['training']['epochs']} ({epoch_elapsed:.1f}s) | "
             f"loss={row['train_loss']:.5f} | train_acc={row['train_accuracy']:.4f} | "
             f"val_acc={validation['accuracy']:.4f} | val_macro_f1={validation['macro_f1']:.4f} | "
             f"best_val_acc={best_accuracy:.4f}@{best_epoch}",
