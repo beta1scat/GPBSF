@@ -368,7 +368,8 @@ summary because their controlled factors are stored as observation modes:
 python -m experiments.fitting.evaluate \
   --manifest data/bgspcd_v4_robust/manifest.jsonl \
   --split test \
-  --output runs/fitting/v4_robust_oracle_test.csv
+  --output runs/fitting/v4_robust_oracle_test.csv \
+  --export-fallback-log runs/fitting/fallback_triggers.csv
 ```
 
 ## 6. Notes

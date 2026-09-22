@@ -28,6 +28,12 @@ from experiments.classification.labels import LABEL_BY_NAME  # noqa: E402
 
 
 def _records(manifest: Path, split: str, limit: Optional[int]):
+    if not manifest.exists():
+        raise FileNotFoundError(
+            f"Manifest file not found: {manifest}\n"
+            f"If evaluating on the V4 dataset, please generate it first using:\n"
+            f"  python -m experiments.bgspcd.robust --config config/experiments/bgspcd_v4_robust.json"
+        )
     result = []
     with manifest.open("r", encoding="utf-8") as stream:
         for line in stream:
@@ -102,15 +108,39 @@ def _chamfer(left: np.ndarray, right: np.ndarray) -> float:
 def _summary(rows: list[dict]) -> dict:
     valid = [row for row in rows if row["fit_success"]]
     metrics_valid = [row for row in valid if row["metrics_valid"]]
+    fallback_count = sum(1 for row in rows if row.get("fallback_triggered", False))
+    rejection_count = sum(1 for row in rows if not row.get("fit_success", False))
+
+    avail_center_20mm = sum(1 for r in metrics_valid if r["center_error_m"] is not None and r["center_error_m"] <= 0.02)
+    avail_center_50mm = sum(1 for r in metrics_valid if r["center_error_m"] is not None and r["center_error_m"] <= 0.05)
+    avail_strict = sum(
+        1 for r in metrics_valid
+        if r["center_error_m"] is not None and r["center_error_m"] <= 0.02
+        and r["size_relative_error"] is not None and r["size_relative_error"] <= 0.15
+    )
+
     result = {
         "sample_count": len(rows),
         "fit_success_rate": len(valid) / len(rows) if rows else 0.0,
+        "rejection_rate": rejection_count / len(rows) if rows else 0.0,
         "metrics_valid_count": len(metrics_valid),
         "metrics_valid_rate_among_fits": len(metrics_valid) / len(valid) if valid else 0.0,
+        "fallback_count": fallback_count,
+        "fallback_rate": fallback_count / len(rows) if rows else 0.0,
+        "task_tolerance_availability": {
+            "center_lte_20mm_rate": avail_center_20mm / len(rows) if rows else 0.0,
+            "center_lte_50mm_rate": avail_center_50mm / len(rows) if rows else 0.0,
+            "strict_grasp_tolerance_rate": avail_strict / len(rows) if rows else 0.0,
+        },
     }
     for key in ("center_error_m", "size_relative_error", "surface_chamfer_m", "observed_to_fitted_m", "runtime_ms"):
         values = [float(row[key]) for row in valid if row[key] is not None]
-        result[key] = {"median": float(np.median(values)) if values else None, "p95": float(np.quantile(values, 0.95)) if values else None}
+        result[key] = {
+            "median": float(np.median(values)) if values else None,
+            "p90": float(np.quantile(values, 0.90)) if values else None,
+            "p95": float(np.quantile(values, 0.95)) if values else None,
+            "p99": float(np.quantile(values, 0.99)) if values else None,
+        }
     return result
 
 
@@ -152,6 +182,8 @@ def evaluate(args: argparse.Namespace) -> None:
             "fit_success": fit_success,
             "metrics_valid": False,
             "fitting_method": fitter.last_method,
+            "fallback_triggered": fitter.last_fallback_triggered,
+            "fallback_type": fitter.last_fallback_type,
             "error": error,
             "metric_error": None,
             "runtime_ms": runtime_ms,
@@ -159,6 +191,10 @@ def evaluate(args: argparse.Namespace) -> None:
             "size_relative_error": None,
             "surface_chamfer_m": None,
             "observed_to_fitted_m": None,
+            "truth_center": None,
+            "predicted_center": None,
+            "truth_dimensions": None,
+            "predicted_dimensions": None,
         }
         if params:
             try:
@@ -168,6 +204,10 @@ def evaluate(args: argparse.Namespace) -> None:
                 truth_vector = np.asarray(_dimension_vector(primitive, truth_dimensions), dtype=np.float64)
                 row["center_error_m"] = float(np.linalg.norm(predicted_pose[:3, 3] - truth_pose[:3, 3]))
                 row["size_relative_error"] = float(np.mean(np.abs(predicted_vector - truth_vector) / truth_vector))
+                row["truth_center"] = json.dumps(truth_pose[:3, 3].tolist())
+                row["predicted_center"] = json.dumps(predicted_pose[:3, 3].tolist())
+                row["truth_dimensions"] = json.dumps(truth_dimensions)
+                row["predicted_dimensions"] = json.dumps(predicted_dimensions)
                 rng = np.random.default_rng(int(record["seed"]) + 701)
                 truth_surface = _apply_pose(_sample_surface(primitive, rng, args.surface_points, truth_dimensions), truth_pose)
                 predicted_surface = _apply_pose(_sample_surface(primitive, rng, args.surface_points, predicted_dimensions), predicted_pose)
@@ -190,6 +230,22 @@ def evaluate(args: argparse.Namespace) -> None:
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
+
+    if args.export_fallback_log:
+        fb_path = Path(args.export_fallback_log).resolve()
+        fb_path.parent.mkdir(parents=True, exist_ok=True)
+        fb_rows = [r for r in rows if r.get("fallback_triggered")]
+        if fb_rows:
+            with fb_path.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.DictWriter(stream, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(fb_rows)
+        else:
+            with fb_path.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.DictWriter(stream, fieldnames=fields)
+                writer.writeheader()
+        print(f"Fallback log exported to {fb_path} ({len(fb_rows)} triggers)")
+
     difficulties = sorted({row["difficulty"] for row in rows})
     primitives = sorted({row["primitive"] for row in rows})
     sources = sorted({row["source_dataset"] for row in rows})
@@ -213,9 +269,10 @@ def evaluate(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--manifest", default="data/bgspcd_v3_camera/manifest.jsonl")
+    parser.add_argument("--manifest", default="data/bgspcd_v4_robust/manifest.jsonl")
     parser.add_argument("--split", default="test", choices=("val", "test"))
-    parser.add_argument("--output", default="runs/fitting/oracle_test.csv")
+    parser.add_argument("--output", default="runs/fitting/v4_robust_oracle_test.csv")
+    parser.add_argument("--export-fallback-log", default=None, help="Path to export dedicated fallback triggers CSV log")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--surface-points", type=int, default=4096)
     evaluate(parser.parse_args())
