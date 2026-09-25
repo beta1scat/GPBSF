@@ -36,6 +36,7 @@ from .pointcloud import (
     pc_normalize,
     generate_cone_points,
     generate_ellipsoid_points,
+    compute_trimmed_distance,
 )
 
 
@@ -67,6 +68,27 @@ def align_vector_to_z(v):
     y_axis = np.cross(v, x_axis)
 
     return np.column_stack((x_axis, y_axis, v))
+
+
+def _safe_se3(R, t):
+    """Construct an SE3 pose guaranteed to be in SO(3) without raising bad argument errors.
+
+    If det(R) < 0 (reflection / left-handed frame from Open3D PCA/OBB), the 3rd column is
+    negated to ensure a valid right-handed rotation matrix.
+    """
+    R_mat = np.asarray(R, dtype=np.float64).copy()
+    if R_mat.shape != (3, 3):
+        return SE3()
+    if np.linalg.det(R_mat) < 0:
+        R_mat[:, 2] = -R_mat[:, 2]
+    # SVD projection to ensure exact orthonormality and avoid floating point drift
+    u, _, vt = np.linalg.svd(R_mat)
+    R_clean = u @ vt
+    if np.linalg.det(R_clean) < 0:
+        u[:, -1] *= -1
+        R_clean = u @ vt
+    t_vec = np.asarray(t, dtype=np.float64).flatten()[:3]
+    return SE3.Rt(SO3(R_clean, check=False), t_vec)
 
 
 def _oriented_bounding_box(pcd):
@@ -716,6 +738,111 @@ def fit_frustum_cone_obb(pcd):
 
 
 
+def compute_cone_residual(
+    pcd, r1, r2, height, T, n_eval_points=2000, inlier_ratio=0.90
+) -> float:
+    """Compute robust trimmed surface distance residual between observed pcd and fitted cone."""
+    if height <= 1e-4 or r1 <= 1e-4 or r2 <= 1e-4:
+        return float("inf")
+    try:
+        pts = generate_cone_points(
+            r_bottom=r2,
+            r_top_ratio=r1 / r2 if r2 > 1e-6 else 1.0,
+            height=height,
+            delta=0.0,
+            points_density=0,
+            total_points=n_eval_points,
+        )
+        fit_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
+        T_mat = T.A if hasattr(T, "A") else np.asarray(T, dtype=np.float64)
+        fit_pcd.transform(T_mat)
+
+        n_pts = len(pcd.points)
+        if n_pts > 2000:
+            step = max(1, n_pts // 2000)
+            eval_pcd = pcd.uniform_down_sample(every_k_points=step)
+        else:
+            eval_pcd = pcd
+
+        return compute_trimmed_distance(eval_pcd, fit_pcd, inlier_ratio=inlier_ratio)
+    except Exception:
+        return float("inf")
+
+
+def fit_frustum_cone_adaptive(
+    pcd,
+    tau_cone: float = 2.0,
+    use_poly=False,
+    is_debug=False,
+):
+    """Fit a truncated cone using sequential multi-hypothesis threshold early-exit.
+
+    Hypothesis hierarchy according to Chapter 4 (Algorithm 4.1) and Chapter 5:
+    1. Surface Normal Clustering / Plane Segmentation ("normal"): Plane-normal aligned axis when end-caps are visible.
+    2. Surface Normal RANSAC ("normal_ransac"): Orthogonality / variance-minimizing axis from lateral surface normals.
+    3. PCA Principal Axis ("pca_z0"): Dominant elongated axis for bottles, cups, tubes.
+    4. PCA Secondary Axis ("pca_z2"): Flatter axis for bowls, shallow containers.
+    5. Oriented Bounding Box ("obb"): Global 3D bounding frame for truncated views.
+
+    Exits early as soon as a hypothesis achieves robust trimmed distance <= tau_cone (default 2.0 mm).
+    If no hypothesis meets the threshold, returns the hypothesis with the minimal residual.
+
+    Returns:
+        Tuple of (r1, r2, height, T, method_name, residual)
+    """
+    # Downsample dense point clouds to ~2048 points for fast, robust geometric axis/parameter fitting
+    n_pts = len(pcd.points) if hasattr(pcd, "points") else len(pcd)
+    if n_pts > 2048:
+        step = max(1, n_pts // 2048)
+        pcd_fit = pcd.uniform_down_sample(every_k_points=step) if hasattr(pcd, "uniform_down_sample") else pcd[::step]
+    else:
+        pcd_fit = pcd
+
+    hypotheses = [
+        ("pca_z0", lambda: fit_frustum_cone_pca(pcd_fit, use_poly=use_poly, z_dir=0)),
+        ("pca_z2", lambda: fit_frustum_cone_pca(pcd_fit, use_poly=use_poly, z_dir=2)),
+        ("normal", lambda: fit_frustum_cone_normal(pcd_fit, use_poly=use_poly, plane_t=0.005, normal_t=0.02, use_plane_normal=True)),
+        ("normal_ransac", lambda: fit_frustum_cone_normal(pcd_fit, use_poly=use_poly, plane_t=0.01, normal_t=0.02, use_plane_normal=False)),
+        ("obb", lambda: fit_frustum_cone_obb(pcd_fit)),
+    ]
+
+    best_fit = None
+    best_residual = float("inf")
+    best_method = "none"
+
+    for name, solver in hypotheses:
+        try:
+            r1, r2, h, T = solver()
+        except Exception:
+            continue
+
+        if h <= 1e-4 or r1 <= 1e-4 or r2 <= 1e-4:
+            continue
+
+        residual = compute_cone_residual(pcd, r1, r2, h, T)
+        if residual < best_residual:
+            best_residual = residual
+            best_fit = (r1, r2, h, T)
+            best_method = name
+
+        # Threshold Early-Exit condition (门限早停: <= tau_cone mm)
+        if residual <= tau_cone:
+            return best_fit[0], best_fit[1], best_fit[2], best_fit[3], best_method, best_residual
+
+    if best_fit is not None:
+        return best_fit[0], best_fit[1], best_fit[2], best_fit[3], best_method, best_residual
+
+    # Fallback to normal if all failed
+    try:
+        r1, r2, h, T = fit_frustum_cone_normal(pcd, use_poly=use_poly)
+        res = compute_cone_residual(pcd, r1, r2, h, T)
+        return r1, r2, h, T, "normal_fallback", res
+    except Exception:
+        pass
+
+    return 0.0, 0.0, 0.0, SE3(), "failed", float("inf")
+
+
 def _rotvec_to_mat(v):
     theta = float(np.linalg.norm(v))
     if theta < 1e-8:
@@ -908,7 +1035,7 @@ class FittingByBGS:
         self.last_fallback_triggered = False
         self.last_fallback_type = None
 
-    def fitting(self, pcd, cls="0", visual=False):
+    def fitting(self, pcd, cls="0", visual=False, tau_cone=2.0):
         """Fit a primitive shape to the point cloud.
 
         Args:
@@ -954,19 +1081,16 @@ class FittingByBGS:
 
         elif cls == "1":
             try:
-                r1, r2, height, T = fit_frustum_cone_normal(
-                    pcd_fit,
-                    plane_t=0.005,
-                    normal_t=0.02,
-                    use_plane_normal=True,
+                r1, r2, height, T, method, res = fit_frustum_cone_adaptive(
+                    pcd_fit, tau_cone=tau_cone
                 )
-                self.last_method = "normal_slice"
-            except (ValueError, RuntimeError, np.linalg.LinAlgError) as exc:
+                self.last_method = f"cone_adaptive_{method}"
+            except Exception as exc:
                 r1, r2, height, T = fit_frustum_cone_pca(pcd_fit, z_dir=0)
                 self.last_method = "pca_slice_fallback"
                 self.last_fallback_triggered = True
                 self.last_fallback_type = "pca_slice_fallback"
-                self.last_error = f"normal_slice_fallback: {type(exc).__name__}: {exc}"
+                self.last_error = f"cone_adaptive_fallback: {type(exc).__name__}: {exc}"
             if visual:
                 self._visualize_cone(pcd, r1, r2, height, T)
             params = [r1, r2, height, T]

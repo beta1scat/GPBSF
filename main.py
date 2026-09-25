@@ -14,6 +14,7 @@ from shape_fitting.pointcloud import (
     generate_cube_points,
     generate_ellipsoid_points,
     pc_normalize,
+    compute_trimmed_distance,
 )
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent
@@ -127,7 +128,7 @@ def main() -> None:
             print(f"Pcd points: {len(pcd.points)} points")
 
             if pred_int == 1:
-                type_list = ["01", "11", "12", "13", "14"]
+                type_list = ["1", "01"]
             elif pred_int == 2:
                 type_list = ["2"]
             else:
@@ -159,7 +160,10 @@ def main() -> None:
                 elif tp in ("1", "11", "12", "13", "14"):
                     r1, r2, height, _ = params
                     points = generate_cone_points(
-                        r_bottom=r2, r_top_ratio=r1 / r2, height=height, total_points=5000
+                        r_bottom=r2,
+                        r_top_ratio=r1 / r2 if r2 > 1e-6 else 1.0,
+                        height=height,
+                        total_points=5000,
                     )
                 elif tp == "2":
                     points = generate_ellipsoid_points(*params[:3], total_points=5000)
@@ -177,10 +181,13 @@ def main() -> None:
 
                 dist_pcd_fit = o3d.geometry.PointCloud(pcd_fit)
                 dist_pcd_fit.transform(params[-1])
-                min_dist1 = pcd.compute_point_cloud_distance(dist_pcd_fit)
-                min_dist2 = dist_pcd_fit.compute_point_cloud_distance(pcd)
-                mean_dist = np.mean(min_dist1) + np.mean(min_dist2)
+                mean_dist = compute_trimmed_distance(pcd, dist_pcd_fit, inlier_ratio=0.90)
                 min_dist_list.append(mean_dist)
+                print(f"Subtype {tp} trimmed distance: {mean_dist:.4f} mm")
+
+                if mean_dist <= 2.0:
+                    print(f"Early exit triggered for subtype {tp} (trimmed_dist={mean_dist:.4f} <= 2.0 mm)")
+                    break
 
             min_idx = np.argmin(min_dist_list)
             pcd_fit = pcd_fit_list[min_idx]

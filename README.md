@@ -370,6 +370,10 @@ python -m experiments.fitting.evaluate \
   --split test \
   --output runs/fitting/v4_robust_oracle_test.csv \
   --export-fallback-log runs/fitting/fallback_triggers.csv
+
+python3 experiments/fitting/format_table43.py \
+  --summary runs/fitting/v4_robust_oracle_test.summary.json \
+  --csv runs/fitting/v4_robust_oracle_test.csv
 ```
 
 ## 6. Notes

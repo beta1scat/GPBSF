@@ -6,6 +6,7 @@ import numpy as np
 import open3d as o3d
 import scipy
 import scipy.optimize
+from scipy.spatial import cKDTree
 
 np.set_printoptions(suppress=True)
 
@@ -642,4 +643,37 @@ def depth_to_pointcloud(depth_image, fx, fy, cx, cy):
     pointcloud = np.stack((x.flatten(), y.flatten(), z.flatten()), axis=-1)
     nonzero_indices = np.all(pointcloud != [0, 0, 0], axis=1)
     return pointcloud[nonzero_indices]
+
+
+def compute_trimmed_distance(
+    pcd,
+    fit_pcd,
+    inlier_ratio: float = 0.90,
+) -> float:
+    """Compute robust trimmed point cloud distance (focusing on the closest inlier_ratio fraction).
+
+    Filters out extreme boundary noise, flying pixels, and contact-surface artifacts.
+    Evaluates how closely the fitted primitive surface matches the true visible workpiece surface.
+
+    Args:
+        pcd: Observed point cloud (o3d.geometry.PointCloud or (N, 3) ndarray).
+        fit_pcd: Synthetic point cloud from fitted primitive (o3d.geometry.PointCloud or (M, 3) ndarray).
+        inlier_ratio: Ratio of closest points to retain (default 0.90).
+
+    Returns:
+        Mean distance of the closest inlier_ratio fraction of points.
+    """
+    if pcd is None or fit_pcd is None:
+        return float("inf")
+    pts1 = np.asarray(pcd.points if hasattr(pcd, "points") else pcd, dtype=np.float64)
+    pts2 = np.asarray(fit_pcd.points if hasattr(fit_pcd, "points") else fit_pcd, dtype=np.float64)
+    if pts1.size == 0 or pts2.size == 0:
+        return float("inf")
+
+    tree = cKDTree(pts2)
+    d1, _ = tree.query(pts1, k=1)
+    d1_sorted = np.sort(d1)
+    k = max(1, int(round(inlier_ratio * len(d1_sorted))))
+    return float(np.mean(d1_sorted[:k]))
+
 

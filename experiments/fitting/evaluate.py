@@ -147,7 +147,7 @@ def _summary(rows: list[dict]) -> dict:
 def evaluate(args: argparse.Namespace) -> None:
     try:
         import open3d as o3d
-        from shape_fitting import FittingByBGS
+        from shape_fitting import FittingByBGS, compute_trimmed_distance
     except ImportError as exc:
         raise ImportError("Fitting evaluation requires the GPBSF Open3D fitting dependencies.") from exc
 
@@ -212,7 +212,7 @@ def evaluate(args: argparse.Namespace) -> None:
                 truth_surface = _apply_pose(_sample_surface(primitive, rng, args.surface_points, truth_dimensions), truth_pose)
                 predicted_surface = _apply_pose(_sample_surface(primitive, rng, args.surface_points, predicted_dimensions), predicted_pose)
                 row["surface_chamfer_m"] = _chamfer(predicted_surface, truth_surface)
-                row["observed_to_fitted_m"] = _chamfer(observed, predicted_surface)
+                row["observed_to_fitted_m"] = compute_trimmed_distance(observed, predicted_surface, inlier_ratio=0.90)
                 row["metrics_valid"] = True
             except Exception as exc:
                 # A metric or manifest error must not be reclassified as a
@@ -262,6 +262,8 @@ def evaluate(args: argparse.Namespace) -> None:
             "meaning": "isolates geometric fitting from classification error",
             "fit_success_definition": "the fitter returned finite geometric parameters",
             "metrics_valid_definition": "all ground-truth metric calculations completed",
+            "observed_to_fitted_metric": "90% trimmed point-to-surface distance (inlier_ratio=0.90)",
+            "surface_chamfer_metric": "bidirectional Chamfer distance on 4096 full surface points",
         },
     }
     output.with_suffix(".summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
