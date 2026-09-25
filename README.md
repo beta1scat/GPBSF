@@ -1,368 +1,125 @@
-Geometric Primitive-Based Shape Fitting for Scene Objects (GPBSF).
+# 基于图元几何先验的精细几何建模与拓扑分类 (GPBSF)
+**Geometric Primitive-Based Shape Fitting for Scene Objects**
 
-The repository contains the interactive RGB-D fitting demo and the reproducible
-Chapter 4 experiment pipeline. PointNet++ and Mamba3D are pinned as Git
-submodules; shared GPBSF code controls the data split, preprocessing, training
-budget, metrics, and aggregation so that the comparison uses one protocol.
+本项目对应博士学位论文**第四章“基于图元几何先验的未建模未知物体精细几何建模与拓扑分类”**的核心工程实现与实验复现套件。
 
 ---
 
-## 1. Initialize model submodules
+## 1. 项目概述与架构设计
 
+在复杂非结构化工业与服务场景中，待抓取未知工件往往未预先构建高精度 CAD 资产，且单视角深度相机存在天然的视线自遮挡与点云缺失。传统基于稠密网格重构或神经辐射场的方法解算耗时长、易产生浮点伪影，难以直接导出适于夹爪闭合接触分析的解析流形。
+
+本代码库（GPBSF: Geometric Primitive-Based Shape Fitting）提出了以**三类正交图元（长方体、圆台、椭球）**为几何骨架的建模范式：
+1. **拓扑粗分类（Coarse Topological Classification）**：采用 Mamba3D / PointNet++ 等轻量级三维骨干网络，将未建模工件的单视角残差点云判定为基础几何族（0: 长方体，1: 圆锥/圆台/圆柱，2: 椭球/旋转对称曲面）。
+2. **精细图元几何拟合（Fine Primitive Fitting）**：针对判定的几何族，触发专门优化的代数与几何解析求解器，输出物体的解析几何尺寸与 6-DoF 刚体位姿（$\mathbf{T} \in \mathrm{SE}(3)$）。
+3. **闭环自适应早停（Adaptive Early-Exit）**：通过前 90% 鲁棒截断曲面贴合距离（Trimmed Distance）实时度量残差，以 2.0 mm 物理容忍门限实现假说早停。
+
+```mermaid
+flowchart LR
+    A["单视角点云 P"] --> B["神经网络拓扑粗分类<br/>(Mamba3D / PointNet++)"]
+    B -->|"类 0: 长方体"| C["平面截断 + OBB 拟合<br/>fit_cuboid_obb2"]
+    B -->|"类 1: 圆台/圆柱"| D["自适应多假说门限早停<br/>fit_frustum_cone_adaptive"]
+    B -->|"类 2: 椭球"| E["代数最小二乘 + 几何降级<br/>fit_ellipsoid"]
+    C --> F["解析几何尺寸 + 6-DoF 位姿<br/>& 90% 截断拟合残差"]
+    D --> F
+    E --> F
+```
+
+---
+
+## 2. 核心算法体系
+
+### 2.1 长方体拟合 (`fit_cuboid_obb2` & `fit_cuboid_obb`)
+- **平面截断对齐**：首先利用 RANSAC 算法提取点云中的最大主支撑平面法向量作为基准参考轴；
+- **局部投影与分位数包围盒**：将所有观测点投影至主平面局部正交系中，采用 0.5%--99.5% 稳健分位数截断滤除激光/深度相机边缘拉丝与飞点噪点；
+- **异常退化保底**：当主平面内点数不足（< 20 点）时，自动平滑退化至三维最小定向包围盒（Oriented Bounding Box, OBB）。
+
+### 2.2 圆锥/圆台自适应拟合 (`fit_frustum_cone_adaptive`)
+对应论文**算法 4.1（基于多假设与门限早停的自适应圆台拟合算法）**：
+- **假说生成与优先级排序**：
+  1. `pca_z0`：主成分分析最大主方向轴（适用于细长瓶身、管件）；
+  2. `pca_z2`：主成分分析次主方向轴（适用于浅碗、扁平盒体）；
+  3. `normal`：表面法向量聚类与端面平面截断；
+  4. `normal_ransac`：基于法向量正交性与夹角方差最小化的 RANSAC 轴线求解；
+  5. `obb`：全局最小定向包围盒对称轴。
+- **快速切片圆回归**：对轴向旋转对齐后的点云沿轴线均匀切片，采用闭式代数解 Kåsa 快速圆拟合算法计算各层半径，辅以线性 RANSAC 回归求解顶底半径与中心；
+- **极速门限早停**：一旦某个假说的 90% 截断拟合残差 $\le \tau_{\mathrm{cone}} = 2.0\,\mathrm{mm}$，立即早停返回，将单物体拟合延迟压低至毫秒级。
+
+### 2.3 椭球代数与几何两级拟合 (`fit_ellipsoid`)
+- **一级求解（RANSAC 代数直接最小二乘）**：通过 SVD 求解二次曲面隐式方程系数矩阵，经解析特征值分解还原椭球半轴长、球心坐标与姿态矩阵；
+- **二级降级（几何约束最优化）**：若观测视场角缺失严重导致代数拟合出现负特征值或极度扁平退化，自动触发几何回退机制，基于 PCA 姿态粗对齐与带边界约束的非负最小二乘（NNLS）/ 软 L1 鲁棒信赖域算法（TRF）快速解算物理合理的半轴尺寸。
+
+---
+
+## 3. 实验指标与学术定义
+
+在第四章评测中，严谨区分以下两类指标：
+
+| 评估指标 | 符号与定义 | 物理意义与计算方式 |
+| :--- | :--- | :--- |
+| **全曲面真值重建误差 (mm)**<br>*(Reconstruction Error)* | $D_{\mathrm{full}}(\widehat{\mathcal{S}}, \mathcal{S}_{\mathrm{gt}})$ | 评价算法由单视角不完整观测推断未知物体**完整物理实体曲面**的能力。在真值参数曲面与拟合图元曲面上均匀独立采样各 4,096 点，计算其双向最近邻曲面均值。 |
+| **90% 截断拟合残差 (mm)**<br>*(90% Trimmed Distance)* | $d_{\mathrm{trimmed}}(\mathcal{P}, \widehat{\mathcal{S}})$ | 评价拟合图元表面与**实际可见观测点云**的几何吻合程度。计算观测点云向拟合曲面的最近邻距离，截取距离最近的前 90% 内点计算均值，剔除边缘离群飞点。 |
+
+---
+
+## 4. 环境依赖与配置
+
+本代码库分为两层环境要求：
+
+### 4.1 几何图元拟合与评测基础环境（纯 Python 科学计算栈）
+支持 **Windows PowerShell** 与 **Linux Bash**，无需复杂 CUDA 扩展：
 ```bash
+pip install numpy scipy open3d spatialmath-python scikit-learn
+```
+
+### 4.2 神经网络分类训练与推断环境（Linux / WSL2 + CUDA）
+用于复现表 4.2 的 Mamba3D / PointNet++ 拓扑分类实验矩阵：
+```bash
+# 1. 初始化并更新子模块
 git submodule update --init --recursive
-```
 
-The pinned revisions and their roles are documented in
-[`submodels/README.md`](submodels/README.md).
-
-## 2. Interactive demo model preparation
-
-Download the SAM model checkpoint from the official link:  
-👉 [https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth](https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth)
-
-Then, place the file into the `models/` directory of this repository:
-
-```bash
-models/
-└── sam_vit_h_4b8939.pth
+# 2. 安装 Mamba3D 核心依赖
+pip install torch torchvision
+pip install -r submodels/mamba3d/requirements.txt
+pip install causal-conv1d==1.1.1 mamba-ssm==1.1.1
 ```
 
 ---
 
-## 3. Run the legacy interactive demo with Docker
+## 5. 第四章学术实验完整复现指南
 
-### Step 1: Enter Docker Configuration Folder
+以下所有命令在代码根目录 `code/GPBSF` 下执行。
 
+### 5.1 生成基准点云数据集 BGSPCD-v4-robust
+生成包含 1,800 个几何族、共计 30,400 个样本（训练集 23,040，验证集 2,720，测试集 4,640）的高保真单视角点云基准数据集：
 ```bash
-cd .docker
+python -m experiments.bgspcd.robust --config config/experiments/bgspcd_v4_robust.json
 ```
 
-### Step 2: Launch Container
-
-Run the following command, replacing the path with your actual local path to GPBSF:
-
-```bash
-PATH_TO_GPBSF=/absolute/path/to/gpbsf docker compose run gpu
-```
-
-> 💡 **Tip:**  
-> Make sure Docker and NVIDIA Container Toolkit are properly installed to enable GPU access.
-
----
-
-## 4. Run the legacy interactive demo
-
-After entering the container (or on your host system if dependencies are installed):
+### 5.2 神经网络拓扑分类实验 (复现表 4.2)
+在多随机种子（3407, 3408, 3409）下运行 Mamba3D 与 PointNet++ 的三分类训练及评测：
 
 ```bash
-cd ~/code/gpbsf
-python main.py
-```
-
----
-
-## 5. Chapter 4 reproducible experiments
-
-The experiment pipeline is intentionally separate from `main.py`, which opens
-interactive windows and loads checkpoints during module import.
-
-The Mamba3D submodule documents its reference environment as Python 3.8,
-PyTorch 1.13.1, and CUDA 11.7. Install its pinned requirements and CUDA
-extensions in a dedicated environment before running the Mamba3D entries; the
-PointNet++ baseline must use the same PyTorch environment and the same GPU.
-
-Launch the dedicated pre-configured Mamba3D container directly (recommended, image: `beta1scat/mamba3d:1.0`):
-
-```bash
-cd .docker
-PATH_TO_GPBSF=/absolute/path/to/gpbsf docker compose run mamba3d
-```
-
-Alternatively, when using the base Docker image (`beta1scat/gpbsf:1.0` via `docker compose run gpu`), keep NumPy below version 2. The image's
-PyTorch binary was compiled against the NumPy 1.x C API; NumPy 2 causes the
-`_ARRAY_API not found` warning and may make tensor--NumPy conversion fail.
-Install dependencies from inside the running container, at the GPBSF root:
-
-```bash
-python -m pip install -r submodels/mamba3d/requirements.txt
-python -m pip uninstall -y opencv-python-headless
-python -m pip install --upgrade --force-reinstall "numpy==1.26.4" "opencv-python==4.10.0.84"
-python -m pip install causal-conv1d==1.1.1 mamba-ssm==1.1.1
-(cd submodels/mamba3d/extensions/chamfer_dist && python setup.py install --user)
-```
-
-The original `unlimblue/KNN_CUDA` release was removed. The experiment adapter
-uses the installed compatible `knn_cuda.KNN` package. Record the package source
-and CUDA/PyTorch versions with the experiment outputs when reporting latency.
-
-The Mamba3D adapter resolves the upstream embedded `bimamba_ssm/ops` package
-from `submodels/mamba3d` at runtime. Do not set a machine-specific `PYTHONPATH`
-such as `/home/Mamba3D`.
-
-Generate a family-disjoint synthetic dataset:
-
-The current `BGSPCD-v3-camera` protocol renders only front-facing points that
-survive a pinhole-camera z-buffer, then applies optional image-plane occlusion,
-depth quantization, measurement noise, and outliers. The complete analytic
-surface is retained only as evaluation ground truth.
-
-The default configuration contains 1,800 geometry families. Each family has
-three difficulty levels (`easy`, `medium`, and `hard`) and three independent
-corruption variants per level, producing 16,200 samples in total. Splitting is
-performed at the family level, not the individual point-cloud level, so all
-variants of one geometry remain in exactly one set:
-
-| Split | Families | Samples per primitive | Total samples |
-| --- | ---: | ---: | ---: |
-| Train | 1,260 | 3,780 | 11,340 |
-| Validation | 270 | 810 | 2,430 |
-| Test | 270 | 810 | 2,430 |
-
-Every saved sample contains exactly 2,048 input points. This is a fixed neural
-network input resolution, not a claim about the raw number of depth-camera
-pixels: the visible partial cloud is resampled after camera rendering. The
-complete surface, dimensions, pose, camera metadata, and actual visible ratio
-are retained for ground-truth fitting evaluation only.
-
-```bash
-cd /path/to/graduate-thesis/code/GPBSF
-python -m experiments.bgspcd generate \
-  --config config/experiments/bgspcd.json
-```
-
-On Windows PowerShell, explicitly use the GPBSF directory as the working
-directory. The Python executable may be supplied from another virtual
-environment, but that does not make `GPBSF/experiments` importable by itself:
-
-```powershell
-Set-Location D:\0-research\00-papers\thesis\graduate-thesis\code\GPBSF
-& D:\0-research\00-papers\thesis\graduate-thesis\code\dh-transform-ik\.venv\Scripts\python.exe `
-  -m experiments.bgspcd generate --config config\experiments\bgspcd.json
-```
-
-Validate its manifest and split isolation:
-
-```bash
-python -m experiments.bgspcd validate \
-  --dataset-root data/bgspcd_v3_camera
-```
-
-### V4-Robust training corpus
-
-For the final Chapter 4 training run, use `BGSPCD-v4-robust` rather than
-overwriting either `BGSPCD-v3-camera` or the public legacy corpus. V4 combines
-two explicitly identified sources:
-
-- `legacy_public`: the original public BGSPCD files. The original test list is
-  retained as test-only; a fixed, stratified 10% of its original training list
-  becomes validation data. The remaining legacy samples are training-only.
-- `v4_camera`: 1,800 new family-disjoint geometries (600 per primitive), each
-  rendered under seven single-view camera conditions and one complete-surface
-  condition. Camera-centred rejection sampling requires at least 4,096 unique
-  rendered points before a sample is written. The final 2,048 V4 camera points
-  are drawn without replacement, so the new source never duplicates a small
-  visible fragment merely to reach network input size. Legacy samples retain
-  their historical variable point counts; the cached record exposes any
-  necessary deterministic replacement sampling through `duplicate_ratio`.
-
-The generated corpus contains 30,400 samples: 23,040 training, 2,720
-validation, and 4,640 test samples. `dataset_metadata.json` records source,
-split, and observation-mode counts. The V4 camera renderer uses a
-foreground-sphere depth occluder rather than V3's rectangular image mask. The public external
-`data/experiment` collection remains evaluation-only and is not consulted by
-the generator.
-
-Generate V4 once. The command converts the legacy ASCII XYZ+normal files into
-compact XYZ-only NPZ cache files under the new V4 directory; this can take
-substantial disk I/O but avoids reparsing 10,000-row text files every epoch.
-
-```bash
-cd /path/to/graduate-thesis/code/GPBSF
-python -m experiments.bgspcd.robust \
-  --config config/experiments/bgspcd_v4_robust.json
-```
-
-The command refuses to overwrite an existing output directory. To build a
-new, separately named candidate, pass `--output data/bgspcd_v4_robust_r2` and
-update the classifier configuration manifest accordingly. `--without-legacy`
-builds only the new camera-conditioned source and is not the final V4-Robust protocol.
-
-Validate the complete mixed manifest before training:
-
-```bash
-python -m experiments.classification.cli \
-  --config config/experiments/classification_v4_robust.json \
-  validate-data
-```
-
-To inspect only new V4 camera observations rather than the cached legacy rows:
-
-```bash
-python -m experiments.bgspcd.visualize \
-  --dataset-root data/bgspcd_v4_robust --source v4_camera --split test --index 0 --view both
-```
-
-Use the V4 Mamba3D configuration, which matches the historical architecture
-regularisation and budget (`drop_path_rate=0.1`, batch size 32, 125 epochs):
-
-```bash
+# 运行 Mamba3D 分类矩阵
 python scripts/run_classification_matrix.py \
   --models mamba3d \
   --seeds 3407 3408 3409 \
   --config config/experiments/classification_v4_robust.json
-```
 
-After the Mamba3D results are acceptable, use the same V4 configuration for
-PointNet++ so both models have identical inputs, splits, preprocessing, and
-training seeds:
-
-```bash
+# 运行 PointNet++ 基线矩阵
 python scripts/run_classification_matrix.py \
   --models pointnet2 \
   --seeds 3407 3408 3409 \
   --config config/experiments/classification_v4_robust.json
-```
 
-Aggregate test results and then run the immutable external evaluation with
-the same V4 configuration:
-
-```bash
+# 汇总测试集分类指标 (Accuracy, Macro-F1)
 python -m experiments.classification.cli \
   --config config/experiments/classification_v4_robust.json \
   aggregate --runs-dir runs/classification_v4_robust
-
-python scripts/run_external_evaluation.py \
-  --models mamba3d \
-  --seeds 3407 3408 3409 \
-  --config config/experiments/classification_v4_robust.json \
-  --manifest data/experiment/external_manifest.jsonl
 ```
 
-For a Hugging Face release, publish `data/bgspcd_v4_robust/` together with
-`config/experiments/bgspcd_v4_robust.json`, `dataset_metadata.json`, and this
-repository revision. The cached legacy subset is included so the released V4
-manifest is self-contained; document the original BGSPCD Hugging Face dataset
-as the source of that subset.
-
-Visualize a generated test example. Blue points are the corrupted partial
-observation; green points are the full analytic surface reconstructed from the
-stored ground truth:
-
-```bash
-python -m experiments.bgspcd.visualize \
-  --dataset-root data/bgspcd_v3_camera --split test --index 0 --view both
-```
-
-To export a PNG rather than opening an interactive Open3D window, add
-`--save runs/figures/bgspcd_test_000.png`.
-In the interactive window, press `N` to advance to the next sample and `Q` to
-close the viewer. The terminal prints the selected sample's camera-visible
-fraction, foreground-occluder fraction, noise level, and outlier ratio.
-
-Run the PointNet++ and Mamba3D three-seed matrix:
-
-```bash
-python scripts/run_classification_matrix.py \
-  --models pointnet2 mamba3d \
-  --seeds 3407 3408 3409 \
-  --config config/experiments/classification.json
-```
-
-Aggregate the held-out test results across seeds:
-
-```bash
-python -m experiments.classification.cli \
-  --config config/experiments/classification.json \
-  aggregate --runs-dir runs/classification
-```
-
-### External simulation/real-data validation
-
-`data/experiment` is an immutable external test set, not a source for training,
-early stopping, hyperparameter selection, or checkpoint selection. Build its
-manifest once. The builder pairs each `pcd/*.ply` file with the identically
-named `classes/*.json` label and uses only `input_type`; it maps `0`/`01` to
-cuboid, `1`/`11`/`12`/`13`/`14` to frustum, and `2` to ellipsoid. `pred_type`,
-fitted size, and pose are never used by the classifier evaluation.
-
-```bash
-python -m experiments.classification.cli \
-  --config config/experiments/classification.json \
-  build-external-manifest \
-  --dataset-root data/experiment \
-  --output data/experiment/external_manifest.jsonl
-```
-
-After all synthetic-data runs have completed, evaluate their existing
-validation-selected `best.pt` checkpoints. This writes independent results for
-`real_flat`, `real_clutter`, `sim_flat`, and `sim_clutter`; it does not combine
-the four conditions into a model-selection score.
-
-```bash
-python scripts/run_external_evaluation.py \
-  --models pointnet2 mamba3d \
-  --seeds 3407 3408 3409 \
-  --config config/experiments/classification.json \
-  --manifest data/experiment/external_manifest.jsonl
-```
-
-For each model/seed, outputs are stored under
-`runs/classification/<model>/seed_<seed>/external/external_manifest/`, with
-per-condition JSON summaries, prediction CSVs, and confusion matrices. After
-all seeds are evaluated, calculate mean, standard deviation, and a bootstrap
-95% interval across seeds for each condition separately:
-
-```bash
-python -m experiments.classification.cli \
-  --config config/experiments/classification.json \
-aggregate-external --runs-dir runs/classification
-```
-
-### Archived Mamba3D checkpoint
-
-The original `models/ckpt-best.pth` uses the upstream Mamba3D checkpoint
-format (`base_model` with `module.`-prefixed keys), rather than this
-experiment pipeline's `best.pt` format. Evaluate it separately; never replace
-the three-seed experiment checkpoints with it. The command uses the original
-`config/bgspcd.yaml` model configuration, evaluates the synthetic held-out
-test set and all four external conditions, and writes a standalone result.
-
-```bash
-python -m experiments.classification.cli \
-  --config config/experiments/classification.json \
-  evaluate-legacy-mamba3d \
-  --checkpoint models/ckpt-best.pth \
-  --legacy-model-config config/bgspcd.yaml \
-  --output-dir runs/classification/mamba3d/legacy_ckpt_best \
-  --external-manifest data/experiment/external_manifest.jsonl \
-  --evaluation-seed 3407
-```
-
-Each `(model, seed)` pair runs in a separate process. This is required because
-both upstream repositories use generic top-level Python package names such as
-`models`, `tools`, and `utils`.
-Training prints one line per epoch and also writes the same messages to
-`runs/classification/<model>/seed_<seed>/training.log`; epoch-level structured
-metrics are stored in `metrics.jsonl` in that same directory.
-
-Evaluate geometric fitting against the synthetic geometry truth retained in the
-manifest. This reports observed-to-fitted residual separately from the
-independent fitted-to-truth surface error. The resulting CSV separates
-`fit_success` (the fitter returned parameters) from `metrics_valid` (all
-ground-truth metric calculations completed), so an evaluation-side exception
-cannot be misreported as a fitting failure:
-
-```bash
-python -m experiments.fitting.evaluate \
-  --manifest data/bgspcd_v3_camera/manifest.jsonl \
-  --split test \
-  --output runs/fitting/oracle_test.csv
-```
-
-To assess the final V4-Robust mixed corpus, replace the manifest and use a
-new output path. V4 records are grouped as `not_stratified` in the difficulty
-summary because their controlled factors are stored as observation modes:
+### 5.3 几何图元拟合精度定量评估 (复现表 4.3 基础数据)
+使用测试集真实几何真值引导（Ground Truth Oracle Routing），隔离分类错误，独立评估几何图元拟合求解器的核心性能：
 
 ```bash
 python -m experiments.fitting.evaluate \
@@ -370,22 +127,82 @@ python -m experiments.fitting.evaluate \
   --split test \
   --output runs/fitting/v4_robust_oracle_test.csv \
   --export-fallback-log runs/fitting/fallback_triggers.csv
+```
 
-python3 experiments/fitting/format_table43.py \
+### 5.4 自动化生成表 4.3 LaTeX 报表
+由上述评测生成的 `v4_robust_oracle_test.summary.json` 和 `v4_robust_oracle_test.csv`，一键生成符合博士学位论文规范的 LaTeX 表格代码与中英文对照报表：
+
+```bash
+python experiments/fitting/format_table43.py \
   --summary runs/fitting/v4_robust_oracle_test.summary.json \
   --csv runs/fitting/v4_robust_oracle_test.csv
 ```
 
-## 6. Notes
-
-- The maintained primitive-fitting implementation is
-  [`shape_fitting/`](shape_fitting/), copied from the current LGGPF fitting
-  source and kept inside GPBSF. New code should import `FittingByBGS` from
-  `shape_fitting`.
-- Ensure the `models/` directory exists before running the interactive demo.
-- Always use an absolute path for `PATH_TO_GPBSF` when running Docker.
-- Generated datasets and run directories are ignored by Git. Preserve the
-  resolved configuration, manifest hash, predictions, and aggregate tables when
-  archiving a thesis experiment.
+生成的报表结构严格对应博士论文表 4.3：
+- **类别 (Class)**：长方体 (Cuboid)、圆台 (Frustum Cone)、椭球 (Ellipsoid)、整体 (Overall)；
+- **拟合成功率 (Fit Success Rate)**；
+- **全曲面真值重建误差 (mm)**：中位数 (Median) 与 90 分位数 (P90)；
+- **90% 截断拟合残差 (mm)**：中位数 (Median) 与 90 分位数 (P90)；
+- **几何参数相对误差 (Size Rel Err)**；
+- **平均耗时 (Latency, ms)**。
 
 ---
+
+## 6. 独立点云图元拟合演示 (CLI)
+
+可以使用 `main.py` 对任意离线点云文件进行拟合测试：
+
+### 6.1 自动多图元竞争拟合
+```bash
+python main.py --pcd data/bgspcd/cone/cone_0000.txt --cls auto
+```
+
+### 6.2 定向拟合特定图元
+```bash
+# 拟合长方体 (平面截断 + OBB)
+python main.py --pcd sample.ply --cls 0
+
+# 拟合自适应圆台
+python main.py --pcd sample.ply --cls 1 --tau-cone 2.0
+
+# 拟合椭球
+python main.py --pcd sample.ply --cls 2
+```
+
+### 6.3 启用 Open3D 3D 窗口交互可视化
+添加 `--visualize` 参数即可同屏渲染原始点云（蓝色）、拟合图元解析曲面（绿色）与 6-DoF 刚体坐标轴：
+```bash
+python main.py --pcd sample.ply --cls auto --visualize
+```
+
+---
+
+## 7. 仓库文件组织结构
+
+```
+code/GPBSF/
+├── shape_fitting/               # 核心解析几何图元拟合算法包
+│   ├── __init__.py              # 导出 FittingByBGS, fit_* 等核心 API
+│   ├── fitting.py               # 长方体、自适应圆台、两级椭球拟合求解器与调度器
+│   └── pointcloud.py            # 点云归一化、Kåsa 代数圆拟合、代数二次曲面模型与鲁棒截断距离
+├── experiments/                 # 第四章学术复现实验套件
+│   ├── bgspcd/
+│   │   ├── dataset.py           # 仿真相机视锥投影与带约束退化采样器
+│   │   └── robust.py            # BGSPCD-v4-robust 基准数据集生成器
+│   ├── classification/          # Mamba3D / PointNet++ 拓扑分类训练、推断与评测
+│   │   ├── adapters/            # 模型适配器 (Mamba3D / PointNet++)
+│   │   ├── cli.py               # 分类实验 CLI
+│   │   └── engine.py            # 训练与评估引擎
+│   └── fitting/
+│       ├── evaluate.py          # 图元拟合精度评测脚本 (Oracle Routing)
+│       └── format_table43.py    # 表 4.3 自动化 LaTeX 与 Markdown 报表生成器
+├── main.py                      # 独立点云图元拟合 CLI 工具与交互演示入口
+├── sam.py                       # SAM 分割工具封装 (用于交互演示)
+└── config/experiments/          # 实验配置文件 (数据集、网络架构与超参数)
+```
+
+---
+
+## 8. 引用与致谢
+
+本代码库作为博士学位论文研究支撑开源，拟合算法在后续研究中作为先验特征直接支撑第五章语言引导多图元对称位姿流形抓取规划（LGGPF）系统。

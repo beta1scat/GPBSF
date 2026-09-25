@@ -1,10 +1,9 @@
-"""Segment Anything Model (SAM) wrapper and depth projection utilities."""
-
 from __future__ import annotations
 
-import cv2
 import numpy as np
 from segment_anything import SamPredictor, sam_model_registry
+
+from shape_fitting.pointcloud import depth_to_pointcloud
 
 
 class SegmentAnythingModel:
@@ -26,20 +25,3 @@ class SegmentAnythingModel:
         )
         return masks[0]
 
-
-# Backward compatibility alias
-SegmentAnythinModel = SegmentAnythingModel
-
-
-def depth_to_pointcloud(
-    depth_image: np.ndarray, fx: float, fy: float, cx: float, cy: float
-) -> np.ndarray:
-    """Convert depth map to 3D point cloud using pinhole camera intrinsics."""
-    height, width = depth_image.shape
-    u, v = np.meshgrid(np.arange(1, width + 1), np.arange(1, height + 1))
-    z = depth_image
-    x = (u - cx) * z / fx
-    y = (v - cy) * z / fy
-    pointcloud = np.stack((x.flatten(), y.flatten(), z.flatten()), axis=-1)
-    nonzero_indices = np.all(pointcloud != [0, 0, 0], axis=1)
-    return pointcloud[nonzero_indices]

@@ -157,23 +157,6 @@ def fit_circle_kasa(points):
         return None
 
 
-class CircleLeastSquaresModel:
-    """2D circle fitting model. Data shape: (N, 2)."""
-
-    def fit(self, data):
-        kasa_res = fit_circle_kasa(data)
-        if kasa_res is not None:
-            c, r = kasa_res
-            return (c[0], c[1], r)
-        return None
-
-    def get_error(self, data, model):
-        if model is None:
-            return np.full(data.shape[0], np.inf)
-        x0, y0, r = model
-        return np.abs(np.linalg.norm(data - np.array([x0, y0]), axis=1) - r)
-
-
 class EllipsoidLeastSquaresModel:
     """3D ellipsoid fitting model. Data shape: (N, 3).
 
@@ -533,95 +516,6 @@ def generate_ellipsoid_points(a=10, b=10, c=10, total_points=10000):
 # Geometric utilities
 # =============================================================================
 
-
-def points_to_point_distance(points, point):
-    """Compute Euclidean distance from each point in an array to a single point."""
-    return np.linalg.norm(points - point, ord=2, axis=1)
-
-
-def fit_circle(points, num_iterations=100, threshold=0.01):
-    """Circle fitting for 2D points using fast algebraic Kåsa initialization with RANSAC fallback.
-
-    Args:
-        points: (N, 2) array of 2D points.
-        num_iterations: Number of RANSAC iterations.
-        threshold: Inlier distance threshold.
-
-    Returns:
-        Tuple of (best_circle, best_num_inliers, outlier_indices) where
-        best_circle is (center, radius) or None.
-    """
-    points = np.asarray(points)
-    num_total_points = len(points)
-    if num_total_points < 3:
-        return None, 0, None
-
-    # Fast direct algebraic fit shortcut (0.01 ms)
-    kasa_fit = fit_circle_kasa(points)
-    if kasa_fit is not None:
-        c_kasa, r_kasa = kasa_fit
-        dists = np.abs(points_to_point_distance(points, c_kasa) - r_kasa)
-        inliers_idx = np.where(dists <= threshold)[0]
-        if len(inliers_idx) >= 0.7 * num_total_points:
-            outliers_idx = np.where(dists > threshold)[0]
-            return (c_kasa, r_kasa), len(inliers_idx), outliers_idx
-
-    best_circle = None
-    best_num_inliers = 0
-    remained_points_indices = None
-    num_iterations = min(num_iterations, 100)
-
-    for _ in range(num_iterations):
-        random_indices = np.random.choice(num_total_points, 3, replace=False)
-        circle_points = points[random_indices]
-        x1, x2, x3 = circle_points[0][0], circle_points[1][0], circle_points[2][0]
-        y1, y2, y3 = circle_points[0][1], circle_points[1][1], circle_points[2][1]
-        A = np.array(
-            [
-                [2 * (x1 - x2), 2 * (y1 - y2)],
-                [2 * (x1 - x3), 2 * (y1 - y3)],
-                [2 * (x2 - x3), 2 * (y2 - y3)],
-            ]
-        )
-        B = np.array(
-            [
-                [x1**2 + y1**2 - x2**2 - y2**2],
-                [x1**2 + y1**2 - x3**2 - y3**2],
-                [x2**2 + y2**2 - x3**2 - y3**2],
-            ]
-        )
-        try:
-            X = np.linalg.lstsq(A, B, rcond=None)[0]
-            center = np.array([X[0][0], X[1][0]])
-            r = np.linalg.norm(circle_points[0] - center)
-        except Exception:
-            continue
-        outliers = np.where(
-            abs(points_to_point_distance(points, center) - r) > threshold
-        )[0]
-        num_inliers = num_total_points - len(outliers)
-        if num_inliers > best_num_inliers:
-            best_circle = (center, r)
-            best_num_inliers = num_inliers
-            remained_points_indices = outliers
-
-    return best_circle, best_num_inliers, remained_points_indices
-
-
-def find_orthogonal_vectors(normal_vector):
-    """Find two mutually orthogonal vectors perpendicular to a given normal.
-
-    Args:
-        normal_vector: (3,) array representing the surface normal.
-
-    Returns:
-        Tuple of two (3,) orthogonal vectors lying in the plane.
-    """
-    v1 = np.random.rand(3)
-    v1_proj = np.dot(v1, normal_vector) / np.linalg.norm(normal_vector) * normal_vector
-    v1_ortho = v1 - v1_proj
-    v2_ortho = np.cross(normal_vector, v1_ortho)
-    return v1_ortho, v2_ortho
 
 
 def depth_to_pointcloud(depth_image, fx, fy, cx, cy):
