@@ -96,6 +96,14 @@ pip install causal-conv1d==1.1.1 mamba-ssm==1.1.1
 python -m experiments.bgspcd.robust --config config/experiments/bgspcd_v4_robust.json
 ```
 
+### 5.1.1 发布/同步数据集至 Hugging Face Hub (双轨制混合上传)
+支持将本地生成的数据集一键打包元数据与核心点云包并推送到 Hugging Face 开源社区：
+```bash
+python -m experiments.bgspcd.upload_hf \
+  --dir data/bgspcd_v4_robust \
+  --repo <username>/bgspcd-v4-robust
+```
+
 ### 5.2 神经网络拓扑分类实验 (复现表 4.2)
 在多随机种子（3407, 3408, 3409）下运行 Mamba3D 与 PointNet++ 的三分类训练及评测：
 

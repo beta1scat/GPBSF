@@ -9,6 +9,7 @@ data/bgspcd_v2/
 data/bgspcd_v3_camera/
 data/bgspcd_v4_robust/
 data/experiment/
+figures/
 
 # Local model checkpoints are large and machine-specific.
 models/*.pth
